@@ -22,8 +22,8 @@ def get_ip_addresses() -> str:
     if result.returncode != 0:
         logging.error('не мог выполнить ip -4 -o a, бросаю исключение')
         raise RuntimeError(f"Ошибка выполнения команды 'ip -4 -o a': {result.stderr}")
-    logging.debug('ip адрес получил')
-
+    logging.debug('вывод ip -4 -o a получил')
+    logging.debug('%s', result.stdout)
     return result.stdout
 
 
@@ -36,18 +36,24 @@ async def double_interface_generator(interfaces: str) -> AsyncIterator[tuple[str
     """
 
     logging.debug('Поиск интерфейсов с несколькими IP-адресами')
-    processed_interfaces = dict()
+    processed_interfaces = {}
     for line in interfaces.splitlines():
         pts = line.split()
         name, ip = pts[1], pts[3]
+        logging.debug('проверяю интерфейс %s, ip - %s', name, ip)
 
         if name not in processed_interfaces:
-            processed_interfaces[name] = ip
+            logging.debug('интерфейс %s ранее не встречался, заношу его в словарь', name)
+            processed_interfaces[name] = [ip]
         else:
-            logging.debug('')
-            ip_1 = processed_interfaces.get(name)
-            ip_2 = ip
-            yield name, ip_1, ip_2
+            logging.debug('нашел дубликат интерфейса %s', name)
+            processed_interfaces[name].append(ip)
+            if len(processed_interfaces[name]) == 2:
+                ip_1, ip_2 = processed_interfaces[name]
+                logging.debug('возвращаю (%s, %s, %s)', name, ip_1, ip_2)
+                yield name, ip_1, ip_2
+            elif len(processed_interfaces[name]) > 2:
+                logging.warning('Интерфейс %s имеет более двух IP-адресов', name)
 
 
 async def read_config(name) -> str:
@@ -59,16 +65,22 @@ async def read_config(name) -> str:
     Raises:
         IOError: При ошибках чтения файла
     """
+    logging.debug('читаю файл конфигурации для %s', name)
 
     config_path = Path(f"/etc/systemd/network/{name}.network")
+    # config_path = Path(f"/run/media/legostaev/1gb WD blue/yandex.disk/programming/renewIPs/testfiles/{name}.network")
+    logging.debug('путь для файла конфигурации - %s', config_path)
 
     try:
         async with aiofiles.open(config_path, mode="r", encoding="utf-8") as f:
             # Чтение всего файла сразу
-            return await f.read()
+            config = await f.read()
+            logging.debug('файл прочитал:\n%s', config)
+            return config
 
     except Exception as e:
-        raise IOError(f"Failed to read file {config_path}: {str(e)}")
+        logging.error('Не смог прочитать файл %s: %s', config_path, str(e))
+        raise IOError(f"Не смог прочитать файл {config_path}: {str(e)}")
 
 
 def get_current_ip(config: str) -> str | None:
@@ -78,6 +90,7 @@ def get_current_ip(config: str) -> str | None:
     :param config: Содержимое конфигурационного файла .network
     :returns: Строка с IP-адресом (например, "192.168.1.10/24")
     """
+    logging.debug('запустил def get_current_ip, получаю текущий ip из конфига')
 
     for line in config.splitlines():
         line = line.strip()
@@ -86,7 +99,9 @@ def get_current_ip(config: str) -> str | None:
             continue
 
         if line.startswith('Address='):
+            logging.debug('Нашел строчку с адресом, извлекаю..')
             ip = line.split('=')[1]
+            logging.debug('ip = %s', ip)
             return ip
 
 
@@ -99,7 +114,12 @@ def get_new_ip(old_ip: str, ip_addr_1: str, ip_addr_2: str) -> str:
     :param ip_addr_2: Второй кандидат на замену
     :return: ip адрес
     """
-    return ip_addr_1 if old_ip == ip_addr_2 else ip_addr_2
+
+    logging.debug('Запускаю def get_new_ip чтобы понять какой ip верный')
+    real_ip = ip_addr_1 if old_ip == ip_addr_2 else ip_addr_2
+    logging.debug('Верный IP - %s', real_ip)
+
+    return real_ip
 
 
 def get_new_gateway(ip_with_mask: str) -> str:
@@ -109,7 +129,12 @@ def get_new_gateway(ip_with_mask: str) -> str:
     :param ip_with_mask: IPv4-адрес (например, "192.168.1.10/24")
     :return: Gateway (например, "192.168.1.1")
     """
-    return '.'.join(ip_with_mask.split('/')[0].split('.')[:-1]) + '.1'
+
+    logging.debug('Запускаю def get_new_gateway чтобы понять gateway')
+    gateway = '.'.join(ip_with_mask.split('/')[0].split('.')[:-1]) + '.1'
+    logging.debug('gateway: %s', gateway)
+
+    return gateway
 
 
 def get_new_table(ip_with_mask: str) -> int:
@@ -119,8 +144,11 @@ def get_new_table(ip_with_mask: str) -> int:
     :param ip_with_mask: IPv4-адрес (например, "192.168.13.100/24")
     :return: Table (например, "113")
     """
+    logging.debug('Запускаю def get_new_table чтобы понять номер таблицы маршрутизации')
     octet = int(ip_with_mask.split('/')[0].split('.')[-2])
     table_num = 100 + octet
+    logging.debug('верный номер таблицы маршрутизации: %d', table_num)
+
     return table_num
 
 
@@ -134,6 +162,7 @@ def rewrite_config_str(config: str, ip: str, gateway: str, table_num: int) -> st
     :param table_num: Новый номер таблицы маршрутизации
     :return: Обновленная конфигурация
     """
+    logging.debug('изменяю исходный конфиг при помощи def rewrite_config_str')
 
     lines = config.splitlines()  # Разделяем на строки
     updated_lines = []
@@ -153,15 +182,38 @@ def rewrite_config_str(config: str, ip: str, gateway: str, table_num: int) -> st
 
 
 async def write_config(interface_name: str, config_str: str) -> None:
-    config_path = f'/etc/systemd/network/{interface_name}.network'
+    """
+    Перезаписывает файл конфигурации
+
+    :param interface_name: Имя интерфейса, для которого меняется файл конфигурации
+    :param config_str: Строковое представление файла конфигурации
+    :raises: OSError - ошибки записи в файл
+    """
+    logging.debug('Перезаписываю исходный файл при помощи def write_config')
+    config_dir = '/etc/systemd/network'
+    # config_dir = '/run/media/legostaev/1gb WD blue/yandex.disk/programming/renewIPs/testfiles'
+    config_path = f'{config_dir}/{interface_name}.network'
+    logging.debug('Путь к файлу конфигурации: %s', config_path)
+
     try:
         async with aiofiles.open(config_path, mode='w', encoding='utf8') as config_file:
             await config_file.write(config_str)
-    except Exception as e:
-        raise IOError(f"Failed to write to file {config_path}: {str(e)}")
+            logging.debug('Файл перезаписал')
+    except OSError as e:
+        logging.error('Ошибка записи в файл %s для интерфейса %s: %s', config_path, interface_name, str(e))
+        raise OSError(f"Ошибка записи в файл {config_path} для интерфейса {interface_name}: {str(e)}")
 
 
 async def change_config(interface_name: str, first_ip: str, second_ip: str) -> None:
+    """
+    Функция изменения файла конфигурации
+
+    :param interface_name: Имя интерфейса, для которого меняется файл конфигурации
+    :param first_ip: Первый кандидат на применение в качестве IP адреса
+    :param second_ip: Второй кандидат на применение в качестве IP адреса
+    """
+    logging.debug('запускаю def change_config для интерфейса %s', interface_name)
+
     conf = await read_config(interface_name)
     old_ip = get_current_ip(conf)
     real_ip = get_new_ip(old_ip, first_ip, second_ip)
@@ -172,12 +224,8 @@ async def change_config(interface_name: str, first_ip: str, second_ip: str) -> N
 
 
 async def main() -> None:
-    # ip_a = get_ip_addresses()
-
-    ip_a = \
-        """186: eth1    inet 192.168.11.100/24 metric 1024 brd 192.168.11.255 scope global dynamic eth0\       valid_lft 75677sec preferred_lft 75677sec
-        187: eth1    inet 192.168.12.100/24 metric 1024 brd 192.168.12.255 scope global dynamic eth1\       valid_lft 75172sec preferred_lft 75172sec
-        188: eth2    inet 192.168.14.100/24 metric 1024 brd 192.168.14.255 scope global dynamic eth2\       valid_lft 75171sec preferred_lft 75171sec"""
+    logging.debug('запускаю def main()')
+    ip_a = get_ip_addresses()
 
     coroutines: list[Coroutine] = []
 

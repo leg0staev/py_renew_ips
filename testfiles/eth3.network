@@ -1,0 +1,17 @@
+[Match]
+Name=eth3
+
+[Network]
+DHCP=yes
+Address=192.168.16.100/24
+DNS=8.8.8.8
+
+[Route]
+Destination=0.0.0.0/0
+Gateway=192.168.16.1
+Metric=100
+Table=116
+
+[RoutingPolicyRule]
+From=192.168.16.100/24
+Table=116
